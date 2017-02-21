@@ -1,4 +1,4 @@
-QT += network gui-private
+QT += network
 unix:!macx:{ QT += x11extras }
 
 CONFIG += qxt
@@ -31,8 +31,6 @@ unix:!macx {
 macx: {
         SOURCES += $$PWD/gui/qxtwindowsystem_mac.cpp \
                 $$PWD/gui/qxtglobalshortcut_mac.cpp
-
-        HEADERS  += $$PWD/qxtwindowsystem_mac.h
 
 	QMAKE_LFLAGS += -framework Carbon -framework CoreFoundation
 }

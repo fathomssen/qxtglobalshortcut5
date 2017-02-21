@@ -2,157 +2,162 @@
 #define QXTWINDOWSYSTEM_MAC_CPP
 
 #include "qxtwindowsystem.h"
-#include "qxtwindowsystem_mac.h"
 
-// WId to return when error
+#include <Carbon/Carbon.h>
+#include <MacTypes.h>
+
+#include <map>
+
+using namespace std;
+
+using Layer = int;
+using WinIdLayers = multimap<Layer, WId>;
+
 #define WINDOW_NOT_FOUND (WId)(0)
+#define INVALID_LAYER (Layer)(-2147483626)
 
-WindowList qxt_getWindowsForPSN(ProcessSerialNumber *psn)
+WId getWindowId( CFDictionaryRef winInfo )
 {
-    static CGSConnection connection = _CGSDefaultConnection();
+    // Get the window number - this property is always available
+    CFNumberRef winNum = (CFNumberRef)CFDictionaryGetValue( winInfo, kCGWindowNumber );
 
-    WindowList wlist;
-    if (!psn) return wlist;
+    // Convert window number to WId; skip on error
+    WId winId;
+    if( !CFNumberGetValue(winNum, kCFNumberSInt64Type, &winId) )
+        return WINDOW_NOT_FOUND;
 
-    CGError err((CGError)noErr);
-
-    // get onnection for given process psn
-    CGSConnection procConnection;
-    err = CGSGetConnectionIDForPSN(connection, psn, &procConnection);
-    if (err != noErr) return wlist;
-
-    /* get number of windows open by given process
-       in Mac OS X an application may have multiple windows, which generally
-       represent documents. It is also possible that there is no window even
-       though there is an application, it can simply not have any documents open. */
-
-    int windowCount(0);
-    err = CGSGetOnScreenWindowCount(connection, procConnection, &windowCount);
-    // if there are no windows open by this application, skip
-    if (err != noErr || windowCount == 0) return wlist;
-
-    // get list of windows
-    int windowList[windowCount];
-    int outCount(0);
-    err = CGSGetOnScreenWindowList(connection, procConnection, windowCount, windowList, &outCount);
-
-    if (err != noErr || outCount == 0) return wlist;
-
-    for (int i=0; i<outCount; ++i)
-    {
-        wlist += windowList[i];
-    }
-
-    return wlist;
+    return winId;
 }
 
+Layer getWindowLayer( CFDictionaryRef winInfo )
+{
+    // Get the window layer - this property is always available
+    CFNumberRef winLayer = (CFNumberRef)CFDictionaryGetValue( winInfo, kCGWindowLayer );
+
+    // Convert window number to WId; skip on error
+    Layer layer;
+    if( !CFNumberGetValue(winLayer, kCFNumberIntType, &layer) )
+        return INVALID_LAYER;
+
+    return layer;
+}
+
+QRect getWindowGeometry( CFDictionaryRef winInfo )
+{
+    // Get the window bounds - this property is always available
+    CFDictionaryRef winBounds = (CFDictionaryRef)CFDictionaryGetValue( winInfo, kCGWindowBounds );
+
+    // Convert window number to WId; skip on error
+    CGRect rect;
+    if( !CGRectMakeWithDictionaryRepresentation(winBounds, &rect) )
+        return QRect();
+
+    return QRect( rect.origin.x, rect.origin.y, rect.size.width, rect.size.height );
+}
+
+WinIdLayers getVisibleWindows()
+{
+    // This should mimic the behaviour of the Windows version closest
+    CGWindowListOption winOptions = kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements;
+
+    // Get information about all windows matching winOptions
+    CFArrayRef winInfos = CGWindowListCopyWindowInfo( winOptions, kCGNullWindowID );
+
+    WinIdLayers windows;
+    for( int i = 0; i < CFArrayGetCount(winInfos); ++i )
+    {
+        CFDictionaryRef winInfo = (CFDictionaryRef)CFArrayGetValueAtIndex( winInfos, i );
+
+        WId winId = getWindowId( winInfo );
+        if( winId != WINDOW_NOT_FOUND )
+            windows.insert( make_pair(getWindowLayer(winInfo), winId) );
+    }
+
+    return windows;
+}
 
 WindowList QxtWindowSystem::windows()
 {
-    WindowList wlist;
-    ProcessSerialNumber psn = {0, kNoProcess};
+    WindowList ret;
+    for( const auto win : getVisibleWindows() )
+        ret.push_back( win.second );
 
-    // iterate over list of processes
-    OSErr err;
-    while ((err = ::GetNextProcess(&psn)) == noErr)
-    {
-        wlist += qxt_getWindowsForPSN(&psn);
-    }
-
-    return wlist;
+    return ret;
 }
 
 WId QxtWindowSystem::activeWindow()
 {
-    ProcessSerialNumber psn;
-    OSErr err(noErr);
-    err = ::GetFrontProcess(&psn);
-    if (err != noErr) return WINDOW_NOT_FOUND;
-
-    // in Mac OS X, first window for given PSN is always the active one
-    WindowList wlist = qxt_getWindowsForPSN(&psn);
-
-    if (wlist.count() > 0)
-        return wlist.at(0);
+    for( const auto win : getVisibleWindows() )
+    {
+        // Use the first window ID with layer 0
+        if( win.first == 0 )
+            return win.second;
+    }
 
     return WINDOW_NOT_FOUND;
 }
 
-QString QxtWindowSystem::windowTitle(WId window)
+QString QxtWindowSystem::windowTitle( WId winId )
 {
-    CGSValue windowTitle;
-    CGError err((CGError)noErr);
-    static CGSConnection connection = _CGSDefaultConnection();
+    CFArrayRef winInfos = CGWindowListCopyWindowInfo( kCGWindowListOptionIncludingWindow, winId );
 
-    // This code is so dirty I had to wash my hands after writing it.
+    if( CFArrayGetCount(winInfos) > 0 )
+    {
+        CFDictionaryRef winInfo = (CFDictionaryRef)CFArrayGetValueAtIndex( winInfos, 0 );
+        CFStringRef winTitle = (CFStringRef)CFDictionaryGetValue( winInfo, kCGWindowName );
 
-    // most of CoreGraphics private definitions ask for CGSValue as key but since
-    // converting strings to/from CGSValue was dropped in 10.5, I use CFString, which
-    // apparently also works.
+        if( QString::fromCFString(winTitle) == "Item-0" )
+            winTitle = (CFStringRef)CFDictionaryGetValue( winInfo, kCGWindowOwnerName );
 
-    // FIXME: Not public API function. Can't compile with OS X 10.8
-    // err = CGSGetWindowProperty(connection, window, (CGSValue)CFSTR("kCGSWindowTitle"), &windowTitle);
-    if (err != noErr) return QString();
+        return QString::fromCFString( winTitle );
+    }
 
-    // this is UTF8 encoded
-    return QCFString::toQString((CFStringRef)windowTitle);
+    return QString();
 }
 
-QRect QxtWindowSystem::windowGeometry(WId window)
+QRect QxtWindowSystem::windowGeometry( WId winId )
 {
-    CGRect rect;
-    static CGSConnection connection = _CGSDefaultConnection();
+    CFArrayRef winInfos = CGWindowListCopyWindowInfo( kCGWindowListOptionIncludingWindow, winId );
 
-    CGError err = CGSGetWindowBounds(connection, window, &rect);
-    if (err != noErr) return QRect();
+    if( CFArrayGetCount(winInfos) > 0 )
+    {
+        CFDictionaryRef winInfo = (CFDictionaryRef)CFArrayGetValueAtIndex( winInfos, 0 );
+        return getWindowGeometry( winInfo );
+    }
 
-    return QRect(rect.origin.x, rect.origin.y, rect.size.width, rect.size.height);
+    return QRect();
 }
 
-/* This method is the only one that is not a complete hack
-   from Quartz Event Services
-   http://developer.apple.com/library/mac/#documentation/Carbon/Reference/QuartzEventServicesRef/Reference/reference.html
-*/
+// Source: http://developer.apple.com/library/mac/#documentation/Carbon/Reference/QuartzEventServicesRef/Reference/reference.html
 uint QxtWindowSystem::idleTime()
 {
     // CGEventSourceSecondsSinceLastEventType returns time in seconds as a double
-    // also has extremely long name
     double idle = 1000 * ::CGEventSourceSecondsSinceLastEventType(kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType);
     return (uint)idle;
 }
 
 
 // these are copied from X11 implementation
-WId QxtWindowSystem::findWindow(const QString& title)
+WId QxtWindowSystem::findWindow( const QString& title )
 {
-    WId result = 0;
-    WindowList list = windows();
-    foreach(const WId &wid, list)
+    for( const auto winId : windows() )
     {
-        if (windowTitle(wid) == title)
-        {
-            result = wid;
-            break;
-        }
+        if( windowTitle(winId) == title )
+            return winId;
     }
-    return result;
+
+    return WINDOW_NOT_FOUND;
 }
 
-WId QxtWindowSystem::windowAt(const QPoint& pos)
+WId QxtWindowSystem::windowAt( const QPoint& pos )
 {
-    WId result = 0;
-    WindowList list = windows();
-    for (int i = list.size() - 1; i >= 0; --i)
+    for( const auto winId : windows() )
     {
-        WId wid = list.at(i);
-        if (windowGeometry(wid).contains(pos))
-        {
-            result = wid;
-            break;
-        }
+        if( windowGeometry(winId).contains(pos) )
+            return winId;
     }
-    return result;
+
+    return WINDOW_NOT_FOUND;
 }
 
 #endif // QXTWINDOWSYSTEM_MAC_CPP
-
